@@ -4,4 +4,5 @@ Fork des o. g. Monitor von Domapi.
 - Code-Anpassung für ESP32
 - Ausgabe via Bluetooth classic
 
-Benutzung für private Zwecke frei
+
+Benutzung für private Zwecke frei, Änderungen bitte mit dem ursprünglichen Ersteller Domapi abstimmen.
