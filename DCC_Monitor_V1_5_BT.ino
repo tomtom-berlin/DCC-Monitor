@@ -55,30 +55,8 @@
       Pin 6 Optokoppler mit 10 kOhm an 5V reicht aus. Pin 7 muss nicht an 5V angeschlossen sein, er kann unbelegt bleiben.
     - ACK-Signal über Optokoppler CNY17 und Transistor BC557 anschließen, erzeugt Stromimpuls an +/- des Brückengleichrichters.
 
-
-    Arduino Nano:
-    //                      +-----+
-    //         +------------| USB |------------+
-    //         |            +-----+            |
-    //         | [ ]D13/SCK        MISO/D12[ ] |
-    //         | [ ]3.3V           MOSI/D11[ ]~|
-    //         | [ ]V.ref     ___    SS/D10[ ]~|
-    //         | [ ]A0       / N \       D9[ ]~|
-    //         | [ ]A1      /  A  \      D8[ ] |
-    //         | [ ]A2      \  N  /      D7[ ] |
-    //         | [ ]A3       \_0_/       D6[ ]~|
-    //         | [ ]A4/SDA               D5[ ]~|
-    // ACK-Pin | [ ]A5/SCL               D4[ ] |
-    //         | [ ]A6              INT1/D3[ ]~|
-    //         | [ ]A7              INT0/D2[ ] |   DCC-Eingang über Optokoppler Pin 6
-    //         | [ ]5V                  GND[ ] |
-    //         | [ ]RST                 RST[ ] |
-    //         | [ ]GND   5V MOSI GND   TX1[ ] |
-    //         | [ ]Vin   [ ] [ ] [ ]   RX1[ ] |
-    //         |          [ ] [ ] [ ]          |
-    //         |          MISO SCK RST         |
-    //         | NANO-V3                       |
-    //         +-------------------------------+
+ESP32: Pin 27 an Optokoppler-Ausgang des 6N137
+       Pin 26 ist der ACK-Pin
 */
 //-------------------------------------------------------------------------------------------------------
 
