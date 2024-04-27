@@ -3,11 +3,16 @@
     DCC-Monitor zur Ausgabe der DCC-Befehle auf dem seriellen Monitor
     =================================================================
 
-    V 1.4, 17.12.2020 domapi
+    V 1.5, 20.12.2023 domapi
 
-    NEU 17.12.2020
+    NEU 20.12.2023:
+    - Filtermöglichkeiten für Lokadressen und Zubehöradressen eingebaut. Damit wird die Auswertung des DCC-Datentraffic´s auf je eine bestimmte Adresse eingeschränkt.
+    - macht dann aber nur Sinn, wenn man die Adresse laufend anzeigen lässt und sich nicht auf Änderungen beschränlt (Menüpunkte 4 und 5 sollten EIN sein)
+    - domapi Loknamen aktualisiert
+
+    NEU 15.12.2020
     - Anpassung der Pufferroutine bei Schaltartikel-Befehlen (Acc), da bei DCC++ teilweise kein "Signal aus"-Befehl gesendet wird. Die Folge war, dass Befehle verschluckt wurden.
-    - Performance optimiert: 3 x break eingebaut in Puffer-Löschroutine. 
+    - 3 x break eingebaut in Puffer-Löschroutine.
 
     NEU 12.12.2020
     - Der ESU-Lokprogrammer sendet offensichtlich zusätzliche DCC-Kommandos "Analogfunktionsgruppen"
@@ -24,9 +29,9 @@
 
     Features:
     ---------
-    - Ausgabe der Lok-Befehle
+    - Ausgabe der Lok-Befehle, incl. Filtermöglichlkeit auf eine bestimmte Adresse
     - Ausgabe der Lok-CV-Kommandos
-    - Ausgabe der Accessory-Befehle
+    - Ausgabe der Accessory-Befehle, incl. Filteroption
     - Ausgabe der Accessory-CV-Kommandos
     - Ausgabe der CV-Befehle auf dem Programmiergleis
     - Eingaben über seriellen Monitor zur Steuerung der Anzeige
@@ -50,47 +55,58 @@
       Pin 6 Optokoppler mit 10 kOhm an 5V reicht aus. Pin 7 muss nicht an 5V angeschlossen sein, er kann unbelegt bleiben.
     - ACK-Signal über Optokoppler CNY17 und Transistor BC557 anschließen, erzeugt Stromimpuls an +/- des Brückengleichrichters.
 
+Ergänzungen/Änderungen 2024-04 (Thomas Borrmann)
+ESP32 Wiring
+ESP 32 Pin | Optokoppler-Modu-Pin
+-----------+---------------------
+  27       |  SIG
+  25       |  LED
+  3.3V     |  VDD
+  GND      |  GND
 
-    Arduino Nano:
-    //                      +-----+
-    //         +------------| USB |------------+
-    //         |            +-----+            |
-    //         | [ ]D13/SCK        MISO/D12[ ] |
-    //         | [ ]3.3V           MOSI/D11[ ]~|
-    //         | [ ]V.ref     ___    SS/D10[ ]~|
-    //         | [ ]A0       / N \       D9[ ]~|
-    //         | [ ]A1      /  A  \      D8[ ] |
-    //         | [ ]A2      \  N  /      D7[ ] |
-    //         | [ ]A3       \_0_/       D6[ ]~|
-    //         | [ ]A4/SDA               D5[ ]~|
-    // ACK-Pin | [ ]A5/SCL               D4[ ] |
-    //         | [ ]A6              INT1/D3[ ]~|
-    //         | [ ]A7              INT0/D2[ ] |   DCC-Eingang über Optokoppler Pin 6
-    //         | [ ]5V                  GND[ ] |
-    //         | [ ]RST                 RST[ ] |
-    //         | [ ]GND   5V MOSI GND   TX1[ ] |
-    //         | [ ]Vin   [ ] [ ] [ ]   RX1[ ] |
-    //         |          [ ] [ ] [ ]          |
-    //         |          MISO SCK RST         |
-    //         | NANO-V3                       |
-    //         +-------------------------------+
+Code: 
+    - App-Version u. Device-Name in Konstanten ausgelagert
+    - LED-Builtin in #define ausgelagert
+    - Redefinition des min(...)-Makros wg. Compilerfehler auf ESP32
+    - Ausgabe SerialBT anstelle Serial
+    - Blinker-LED kann auf HIGH (Standard) oder LOW aktiviert werden
+
+Library NmraDcc: DEPRECATION ERROR
+    - NmraDcc.h:118 > s/#include <esp_spi_flash.h>/#include <spi_flash_mmap.h>/
 */
 //-------------------------------------------------------------------------------------------------------
-#include <NmraDcc.h>
-#include "BluetoothSerial.h"
 
-const char* app_version = "1.4";
-const char* device_name = "ESP32-DCC-Monitor";
+#include <NmraDcc.h>
+#include "BluetoothSerial.h"  // für ESP32
+
+const char *app_version = "1.5.2";
+const char *device_name = "ESP32-DCC-Monitor";
 
 // workaround for compiler error
-#undef min
+#ifdef min
+  #undef min
+#endif
 inline int min(uint32_t a, unsigned int b) {
   return ((a) < (b) ? (a) : (b));
 }
 
+#ifndef LED_BUILTIN
+  #define LED_BUILTIN 25
+#endif
+
 // Check ob Bluetooth Serial verfuegbar
 #if defined(CONFIG_BT_ENABLED) && defined(CONFIG_BLUEDROID_ENABLED) && defined(CONFIG_BT_SPP_ENABLED)
 BluetoothSerial SerialBT;
+#endif
+
+#define BLINKER_LOW_ACTIVE 1  // LED für DCC-Signal ist LOW-Aktiv
+
+#ifdef ESP32
+  #define IRQ_PIN 27 // ESP32
+  #define ACK_PIN 26 // ESP32
+#else
+  #define IRQ_PIN 2 // Arduino nano
+  #define ACK_PIN 5 // Arduino nano
 #endif
 
 NmraDcc Dcc;
@@ -107,13 +123,15 @@ byte Anzeige_CV = 1;    // Ausgabe von CV-Aktionen (Lesen und Schreiben etc.)
 byte puffern_Lok = 1;  // Schaltet die Speicherung und Prüfung bereits empfangener DCC-Pakete ein/aus
 byte puffern_Acc = 1;
 byte puffern_CV = 1;
+
+uint16_t Lok_Filter, Acc_Filter;  // Werte für die Filterung des DCC-Datenstroms. Es werden dann nur Befehle für diese Adressen gezeigt
 //-------------------------------------------------------------------------------------------------------
 
-const byte DccInterruptPin = 27;
-const byte DccAckPin = 26;  // Arduino-Pin zur Erzeugung eines ACK-Signals
-const char* comp_date = __DATE__ ", " __TIME__;
+const byte DccInterruptPin = IRQ_PIN;  // Pin für IRQ
+const byte DccAckPin = ACK_PIN;        // Pin zur Erzeugung eines ACK-Signals
+const char *comp_date = __DATE__ ", " __TIME__;
 
-int blinker_aus = 10000;  // toggelt die LED an Pin LED_BUILTIN, wenn ein DCC-Paket gefunden wurde --> zeigt DCC-Signal an
+int blinker_aus = 10000;  // toggelt die LED an Pin 13, wenn ein DCC-Paket gefunden wurde --> zeigt DCC-Signal an
 int blinker_an = 5;
 
 const byte bufferSizeAcc = 10;  // Schaltartikelbefehle werden nicht andauernd wiederholt; hier reichen ein paar Pufferplätze aus
@@ -138,10 +156,8 @@ typedef struct
   byte FUNC;
 } Lok_Befehl;
 
-
 ACC_Befehl Acc_received[bufferSizeAcc];
 Lok_Befehl Lok_received[bufferSizeLok];
-
 
 byte pktByteCount = 0;
 unsigned int decoderAddress;
@@ -154,7 +170,7 @@ byte Befehl;
 byte Funktion;
 
 byte Befehls_Byte;
-byte decoderType;  //0=Lok, 1=Zubehör/Accessory
+byte decoderType;  // 0=Lok, 1=Zubehör/Accessory
 
 byte command;
 int CV_address;
@@ -195,6 +211,7 @@ void setup()
 {
   pinMode(LED_BUILTIN, OUTPUT);  // eingebaute LED
   Serial.begin(115200);
+  SerialBT.begin(57600);
   SerialBT.begin(device_name);
   while (!SerialBT) {
     // Warte, bis die serielle Schnittstelle verbunden ist.
@@ -226,147 +243,21 @@ void setup()
 void loop()
 //-------------------------------------------------------------------------------------------------------
 {
-  // You MUST call the NmraDcc.process() method frequently from the Arduino loop() function for correct library operation
-  Dcc.process();
 
-  if (SerialBT.available()) {
-    // Tastatur-Befehle via seriellen Monitor des Arduinos:
+  Dcc.process();             // You MUST call the NmraDcc.process() method frequently from the Arduino loop() function for correct library operation
+  Receive_serial_command();  // Schauen, ob am seriellen Monitor etwas eingegeben wurde
 
-    // 1 = Anzeige Loks ein/aus
-    // 2 = Anzeige Zubehör ein/aus
-    // 3 = Anzeige CV-Befehle ein/aus
-    // 4 = Nur neue Lok-Pakete ein/aus
-    // 5 = Nur neue Zubehör-Pakete ein/aus
-    // 6 = Nur neue CV-Befehle ein/aus
-    // 7 = Statistik
-    // ? = Befehle anzeigen
-
-    switch (SerialBT.read()) {
-      case 49:  // 1
-        SerialBT.print(F("1 Anzeige Loks ein/aus = "));
-        Anzeige_Loks = !Anzeige_Loks;
-        if (Anzeige_Loks) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        break;
-      case 50:  //2
-        SerialBT.print(F("2 Anzeige Zubehör ein/aus = "));
-        Anzeige_Acc = !Anzeige_Acc;
-        if (Anzeige_Acc) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        break;
-      case 51:  // 3
-        SerialBT.print(F("3 Anzeige CV-Befehle ein/aus = "));
-        Anzeige_CV = !Anzeige_CV;
-        if (Anzeige_CV) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        break;
-      case 52:  // 4
-        SerialBT.print(F("4 Nur neue Lok-Pakete anzeigen ein/aus = "));
-        puffern_Lok = !puffern_Lok;
-        if (puffern_Lok) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        break;
-      case 53:  // 5
-        SerialBT.print(F("5 Nur neue Zubehör-Pakete anzeigen ein/aus = "));
-        puffern_Acc = !puffern_Acc;
-        if (puffern_Acc) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        break;
-      case 54:  // 6
-        SerialBT.print(F("6 Nur neue CV-Befehle anzeigen ein/aus = "));
-        puffern_CV = !puffern_CV;
-        if (puffern_CV) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        break;
-      case 55:  // 7
-        SerialBT.println();
-        SerialBT.println(F("S t a t i s t i k"));
-        SerialBT.println(F("-----------------"));
-        SerialBT.print(F("Zeitraum [sec]         :"));
-        print_Zahl_rechts_ln((millis() - start_time) / 1000);
-
-        SerialBT.print(F("Anzahl empfangene Bytes:"));
-        print_Zahl_rechts_ln(z_bytes);
-        SerialBT.print(F("Gültige Kommandos      :"));
-        print_Zahl_rechts_ln(z_invalid + z_idle + z_lok_speed + z_lok_F0 + z_lok_F5 + z_lok_F9 + z_lok_F13 + z_lok_F21 + z_lok_F29 + z_acc + z_dec_reset + z_acc_cv + z_lok_cv + z_prg_CV);
-        SerialBT.print(F("Ungültige Kommandos    :"));
-        print_Zahl_rechts_ln(z_invalid);
-        SerialBT.print(F("Idle-Pakete            :"));
-        print_Zahl_rechts_ln(z_idle);
-
-        SerialBT.print(F("Geschwindigkeitsbefehle:"));
-        print_Zahl_rechts_ln(z_lok_speed);
-        SerialBT.print(F("F0 - F4 Funktionen     :"));
-        print_Zahl_rechts_ln(z_lok_F0);
-        SerialBT.print(F("F5 - F8 Funktionen     :"));
-        print_Zahl_rechts_ln(z_lok_F5);
-        SerialBT.print(F("F9 - F12 Funktionen    :"));
-        print_Zahl_rechts_ln(z_lok_F9);
-        SerialBT.print(F("F13 - F20 Funktionen   :"));
-        print_Zahl_rechts_ln(z_lok_F13);
-        SerialBT.print(F("F21 - F28 Funktionen   :"));
-        print_Zahl_rechts_ln(z_lok_F21);
-        SerialBT.print(F("F29 - F36 Funktionen   :"));
-        print_Zahl_rechts_ln(z_lok_F29);
-
-        SerialBT.print(F("Spezialbefehle Lok     :"));
-        print_Zahl_rechts_ln(z_spezial);
-
-        SerialBT.print(F("Zubehör-Befehle        :"));
-        print_Zahl_rechts_ln(z_acc);
-
-        SerialBT.print(F("Dekoder-Reset-Befehle  :"));
-        print_Zahl_rechts_ln(z_dec_reset);
-        SerialBT.print(F("Zubehör-CV-Befehle     :"));
-        print_Zahl_rechts_ln(z_acc_cv);
-        SerialBT.print(F("Lok-CV-Befehle         :"));
-        print_Zahl_rechts_ln(z_lok_cv);
-        SerialBT.print(F("Programmiergleisbefehle:"));
-        print_Zahl_rechts_ln(z_prg_CV);
-        SerialBT.print(F("Acknowledgments        :"));
-        print_Zahl_rechts_ln(z_ack);
-
-        SerialBT.print(F("Counter Lok            :"));
-        print_Zahl_rechts_ln(Lok_counter);
-        SerialBT.print(F("Counter Acc            :"));
-        print_Zahl_rechts_ln(Acc_counter);
-        break;
-      case 63:  // ?
-        SerialBT.println();
-        SerialBT.println(F("Tastaturbefehle für den seriellen Monitor:"));
-        SerialBT.println();
-        SerialBT.print(F("1 = Anzeige Loks ein/aus                     "));
-        if (Anzeige_Loks) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        SerialBT.print(F("2 = Anzeige Zubehör ein/aus                  "));
-        if (Anzeige_Acc) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        SerialBT.print(F("3 = Anzeige CV-Befehle ein/aus               "));
-        if (Anzeige_CV) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        SerialBT.print(F("4 = Nur neue Lok-Pakete anzeigen ein/aus     "));
-        if (puffern_Lok) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        SerialBT.print(F("5 = Nur neue Zubehör-Pakete anzeigen ein/aus "));
-        if (puffern_Acc) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        SerialBT.print(F("6 = Nur neue CV-Befehle ein/aus              "));
-        if (puffern_CV) SerialBT.println("ein");
-        else SerialBT.println("aus");
-        SerialBT.println(F("7 = Statistik anzeigen"));
-        SerialBT.println(F("? = Befehle anzeigen"));
-        break;
-    }
-    SerialBT.println(" ");
-  }
   // LED ausschalten
   blinker_aus--;
   if (blinker_aus == 0) {
+#ifndef BLINKER_LOW_ACTIVE
     digitalWrite(LED_BUILTIN, 0);  // wenn kein DCC-Signal mehr kommt, die LED ausschalten
+#else
+    digitalWrite(LED_BUILTIN, 1);  // wenn kein DCC-Signal mehr kommt, die LED ausschalten
+#endif
     blinker_aus = 10000;
   }
 }
-
 
 //-------------------------------------------------------------------------------------------------------
 // This function is called by the NmraDcc library when a DCC ACK needs to be sent
@@ -379,7 +270,6 @@ void notifyCVAck()
   digitalWrite(DccAckPin, LOW);
   z_ack++;
 }
-
 
 //-------------------------------------------------------------------------------------------------------
 // Wird aufgerufen, wenn ein Progammierbefehl von der Zentrale gesendet wurde
@@ -396,16 +286,18 @@ void notifyServiceMode(bool Prg_gleis_Mode)
   Service_Mode = Prg_gleis_Mode;
 }
 
-
-
 //-------------------------------------------------------------------------------------------------------
-void notifyDccMsg(DCC_MSG* Msg)
+void notifyDccMsg(DCC_MSG *Msg)
 //-------------------------------------------------------------------------------------------------------
 {
   // LED einschalten
   blinker_an--;
   if (blinker_an == 0) {
+#ifndef BLINKER_LOW_ACTIVE
     digitalWrite(LED_BUILTIN, 1);
+#else
+    digitalWrite(LED_BUILTIN, 0);
+#endif
     blinker_an = 5;
   }
 
@@ -469,31 +361,30 @@ void notifyDccMsg(DCC_MSG* Msg)
   // Hierfür werden verschiedene Sequenzen von Befehlen von der Zenrale gesendet.
   // Ob man im Prg.modus auf dem Prg.gleis ist, kann mit der NRMA-Routine notifyServiceMode() geprüft werden.
 
-
   if (Service_Mode && (Msg->Data[0] > 111) && (Msg->Data[0] < 128)) {
     /*  Service Mode.Prog: [preamble] 0 [0111CCVV] 0 [VVVVVVVV] 0 [DDDDDDDD] 0 [EEEEEEEE] 1
-                                                 CC = Command
-                                                   VV VVVVVVVV = 10 bit CV Number
-                                                                       DDDDDDDD = New Value (8 bit)
-                                                                                    EEEEEEEE = Checksum
-            Lesen/Schreiben auf dem Prg.gleis geht ohne Dekoderadresse !
+                                                     CC = Command
+                                                       VV VVVVVVVV = 10 bit CV Number
+                                                                           DDDDDDDD = New Value (8 bit)
+                                                                                        EEEEEEEE = Checksum
+                Lesen/Schreiben auf dem Prg.gleis geht ohne Dekoderadresse !
 
-            Schreiben: z.B. CV 6, Wert 20 (--> 4 Bytes ohne Präambel und Trennbits!)
-            Byte 0   Byte 1   Byte 2   Byte 3
-            01111100 -----101 ---10100 10000001
+                Schreiben: z.B. CV 6, Wert 20 (--> 4 Bytes ohne Präambel und Trennbits!)
+                Byte 0   Byte 1   Byte 2   Byte 3
+                01111100 -----101 ---10100 10000001
 
-            0111CCVV VVVVVVVV DDDDDDDD EEEEEEEE
-                11 = Schreiben
-                01 = Lesen/Überprüfen
-                10 = 10 Bit Manipulation
-                  V = CV - 1 --> 5 = CV 5 + 1 = CV6 !
-                                       D = 20                */
+                0111CCVV VVVVVVVV DDDDDDDD EEEEEEEE
+                    11 = Schreiben
+                    01 = Lesen/Überprüfen
+                    10 = 10 Bit Manipulation
+                      V = CV - 1 --> 5 = CV 5 + 1 = CV6 !
+                                           D = 20                */
     z_prg_CV++;
 
     // Nur verarbeiten, wenn neuer Befehl!
     command = Msg->Data[0] & 0b00001100;                                  // 2 Bits enthalten den Schreib-/ Verify-Befehl etc.
     CV_address = ((Msg->Data[0] & 0b00000011) * 256) + Msg->Data[1] + 1;  // Nummer der CV
-    CV_value = Msg->Data[2];                                              // CV-Wert für das Schreiben
+    CV_value = Msg->Data[2];                                             // CV-Wert für das Schreiben
 
     if (!(((CV_value == CV_value_alt) && (CV_address == CV_address_alt) && (command == command_alt)) && puffern_CV)) {
       decoderType = 255;  // vorsichtshalber mal auf einen dämlichen Wert setzen, damit weiter unten nix passiert
@@ -509,10 +400,10 @@ void notifyDccMsg(DCC_MSG* Msg)
 
       switch (Msg->Data[0] & 0b00001100) {
         /*  Die für den Befehlstyp (xxxx-KKxx) im ersten Befehlsbyte festgelegten Werte sind:
-                      KK = 00 – reserviert
-                      KK = 01 – Byte Überprüfen
-                      KK = 11 – Byte Schreiben
-                      KK = 10 – Bit Manipulation*/
+                                  KK = 00 – reserviert
+                                  KK = 01 – Byte Überprüfen
+                                  KK = 11 – Byte Schreiben
+                                  KK = 10 – Bit Manipulation*/
 
         //-----------------------------------------------------------------------------------------------------------------------------------------------------------------
         case 0b00000100:  // Verify Byte
@@ -566,6 +457,9 @@ void notifyDccMsg(DCC_MSG* Msg)
       decoderAddress = Msg->Data[0];  // kurze Adresse
       Befehls_Byte = Msg->Data[1];
 
+      // Nur auswerten, wenn die Adresse dem Lok_Filter entspricht oder gar kein Filter gesetzt ist!
+      if (Lok_Filter > 0 && decoderAddress != Lok_Filter) return;
+
       // Aufteilung der gefundenen Bytes auf Befehle (Was soll der Dekoder tun?) und Funktionen (Wie soll er es tun?)
 
       if ((Befehls_Byte & 0b11100000) == 0b10000000) {
@@ -581,7 +475,7 @@ void notifyDccMsg(DCC_MSG* Msg)
       }
 
       else if ((Befehls_Byte & 0b11110000) == 0b10100000) {
-        Befehl = Befehls_Byte >> 4;            // 1010 = F9 - F12
+        Befehl = Befehls_Byte >> 4;           // 1010 = F9 - F12
         Funktion = Befehls_Byte & 0b00001111;  // xxxx = F12 - F9
         z_lok_F9++;
       }
@@ -602,7 +496,6 @@ void notifyDccMsg(DCC_MSG* Msg)
         Befehl = 0;               // 01RSSSSS
         Funktion = Befehls_Byte;  // Speed 28 Stufen
         z_lok_speed++;
-
       } else if (Befehls_Byte == 0b00111111 && pktByteCount == 4) {
         Befehl = Befehls_Byte;    // 00111111
         Funktion = Msg->Data[2];  // RSSSSSSS Speed 127 Stufen
@@ -610,14 +503,14 @@ void notifyDccMsg(DCC_MSG* Msg)
       }
 
       // NEU 12.12.2020
-      else if (Befehls_Byte == 0b00111101)  // 0011-1101 scheint ein Spezialkommando des ESU Lokprogrammers zu sein. Ws. eine Kennung für den Dekoder, dass er von einem Lokprogrammer angesprochen wird
+      else if (Befehls_Byte == 0b00111101)  // 0011-1101 scheint ein Spezialkommando des ESU Lokprogrammers zu sein. Ws. eine Kennung für den Dekoder, dass er von einem Lokprogrammer
+                                           // angesprochen wird
       {
         Befehl = Befehls_Byte;
         Funktion = Msg->Data[2];  // Erweiterter Betriebsbefehl Analogfunktionsgruppe
         z_spezial++;
       }
       // NEU 12.12.2020
-
     } else {
       //-------------------------------------------------------------------------------------------------------------------------------
       // 11xx-xxxx -->  bit7 = 1 AND bit6 = 1 -> Lok Dekoder lange Adresse
@@ -627,6 +520,9 @@ void notifyDccMsg(DCC_MSG* Msg)
         decoderAddress = 256 * (Msg->Data[0] & 0b00111111) + Msg->Data[1];
         Befehls_Byte = Msg->Data[2];
         decoderType = 0;
+
+        // Nur auswerten, wenn die Adresse dem Lok_Filter entspricht oder gar kein Filter gesetzt ist!
+        if (Lok_Filter > 0 && decoderAddress != Lok_Filter) return;
 
         // Aufteilung der gefundenen Bytes auf Befehle und Funktionen
 
@@ -678,7 +574,7 @@ void notifyDccMsg(DCC_MSG* Msg)
         // NEU 12.12.2020
       }
       //-------------------------------------------------------------------------------------------------------------------------------
-      else  //bit7=1 AND bit6=0 -> Accessory Decoder
+      else  // bit7=1 AND bit6=0 -> Accessory Decoder
       {
         // 10xx-xxxx
         //-------------------------------------------------------------------------------------------------------------------------------
@@ -693,32 +589,30 @@ void notifyDccMsg(DCC_MSG* Msg)
   if (decoderType == 1)  // Accessory Basic
   {
     if (Anzeige_Acc && (Msg->Size != 6)) {
-      z_acc++;
-
       if ((Befehls_Byte & 0b10000000) && (Msg->Size == 3))  // Steuerbefehl für Zubehör Dekoder (Basic Accessory)
       {
-        // Dekoder haben eine Dekoderadresse (die wird zum Programmieren der CVs verwendet) und umfassen i.d.R. 4 Ausgänge zum Ansteuern vn Schaltartikel mit wiederum jeweils 2 Richtungen/Zuständen.
-        // Die Zentrale sendet für Magnetartikel (accessories) immer ein Paket bestehend aus Dekoder-Adresse (= Signal), Ausgang (0 - 3), Richtung (rot/grün bzw. A/B) und Power (ein/aus).
-        // Zunächst wird eine Richtung eingeschaltet; dazu wird das DCC-Telegramm ggf. mehrfach wiederholt
-        // Bei der ECOS wird nach einer einstellbaren Zeit pro "Magnetartikel" ein Ausschaltbefehl (auch mehrfach) hinterhergeschickt
+        // Dekoder haben eine Dekoderadresse (die wird zum Programmieren der CVs verwendet) und umfassen i.d.R. 4 Ausgänge zum Ansteuern vn Schaltartikel mit wiederum jeweils 2
+        // Richtungen/Zuständen. Die Zentrale sendet für Magnetartikel (accessories) immer ein Paket bestehend aus Dekoder-Adresse (= Signal), Ausgang (0 - 3), Richtung (rot/grün
+        // bzw. A/B) und Power (ein/aus). Zunächst wird eine Richtung eingeschaltet; dazu wird das DCC-Telegramm ggf. mehrfach wiederholt Bei der ECOS wird nach einer einstellbaren
+        // Zeit pro "Magnetartikel" ein Ausschaltbefehl (auch mehrfach) hinterhergeschickt
 
         /*  Für Zubehör-/Weichendekoder sendet die DCC-Zentrale 3 Bytes:
-                    Byte 1                      Byte 2                        Byte 3
-                                                   __ __ __
-                    1  0 A7 A6 A5 A4 A3 A2   :   1 AA A9 A8  P A1 A0  R   :   C7 C6 C5 C4 C3 C2 C1 C0
+                                Byte 1                      Byte 2                        Byte 3
+                                                               __ __ __
+                                1  0 A7 A6 A5 A4 A3 A2   :   1 AA A9 A8  P A1 A0  R   :   C7 C6 C5 C4 C3 C2 C1 C0
 
-                    - AA..A0 sind die 11 Bit Adresse eines Zubehördekoders ("Addr") (entspricht quasi der Dekoderadresse und dem Ausgang)
-                    - P = Power (0 = off, 1 = on) ("OutputPower") also bei Doppelspulenantrieben z.B. "ein" oder "aus"
-                    - R = Richtung/Direction, z.B. Abzweig/Gerade oder rot/grün (in welche Richtung sich z.B. der Servo bewegt, 0 = rot, 1 = grün)
-                    - C7..C0 = Checkbyte (Byte_3 = Byte_1 XOR Byte_2)
+                                - AA..A0 sind die 11 Bit Adresse eines Zubehördekoders ("Addr") (entspricht quasi der Dekoderadresse und dem Ausgang)
+                                - P = Power (0 = off, 1 = on) ("OutputPower") also bei Doppelspulenantrieben z.B. "ein" oder "aus"
+                                - R = Richtung/Direction, z.B. Abzweig/Gerade oder rot/grün (in welche Richtung sich z.B. der Servo bewegt, 0 = rot, 1 = grün)
+                                - C7..C0 = Checkbyte (Byte_3 = Byte_1 XOR Byte_2)
 
-                    - Das 1. Byte beginnt immer mit "10" --> 10XX XXXX (Bit#7 = 1, Bit#6 = 0)
-                    - Das 2. Byte beginnt immer mit "1"  --> 1XXX XXXX (Bit#7 = 1)
-                    - Das 3. Byte dient der überprüfung der gesendeten Informationen: Byte_3 = Byte_1 XOR Byte_2
+                                - Das 1. Byte beginnt immer mit "10" --> 10XX XXXX (Bit#7 = 1, Bit#6 = 0)
+                                - Das 2. Byte beginnt immer mit "1"  --> 1XXX XXXX (Bit#7 = 1)
+                                - Das 3. Byte dient der überprüfung der gesendeten Informationen: Byte_3 = Byte_1 XOR Byte_2
 
-                    - Die 11 Bit Adresse des zu steuernden Spulenpaares entsteht aus den 11 Adress-Bits (AA ... A0). Dabei ist zu
-                      beachten, dass die Bits AA, A9, A8 invertiert im ursprünglichen DCC-Paket abgebildet sind.
-                */
+                                - Die 11 Bit Adresse des zu steuernden Spulenpaares entsteht aus den 11 Adress-Bits (AA ... A0). Dabei ist zu
+                                  beachten, dass die Bits AA, A9, A8 invertiert im ursprünglichen DCC-Paket abgebildet sind.
+                            */
 
         decoderAddress = (((~Befehls_Byte) & 0b01110000) << 2) + decoderAddress;  // das ist die DCC-Adresse des Dekoders
         Ausgang = (Befehls_Byte & 0b00000110) >> 1;                               // entspricht 0 - 3 bzw. Ausgang 1 - 4 eines Dekoders
@@ -726,6 +620,11 @@ void notifyDccMsg(DCC_MSG* Msg)
         Weichenadresse = (decoderAddress - 1) * 4 + Ausgang + 1;  // das ist die DCC-Adresse des Schaltartikels
         Direction = (bitRead(Befehls_Byte, 0));                   // Richtung A/B
         Power = (bitRead(Befehls_Byte, 3));                       // Power on/off
+
+        // Nur auswerten, wenn die Weichen-Adresse dem Acc_Filter entspricht oder gar kein Filter gesetzt ist!
+        if (Acc_Filter > 0 && Weichenadresse != Acc_Filter) return;
+
+        z_acc++;
 
         if (puffern_Acc) {
           //-------------------------------------------------------------------------------------------------------------------------------
@@ -764,15 +663,9 @@ void notifyDccMsg(DCC_MSG* Msg)
               SerialBT.print(Power, HEX);
               SerialBT.println(" | ");
 #endif
-              if (Acc_received[j].WADR == Weichenadresse) {
-                Paket_bekannt_A++;
-              }
-              if (Acc_received[j].DIR == Direction) {
-                Paket_bekannt_A++;
-              }
-              if (Acc_received[j].POW == Power) {
-                Paket_bekannt_A++;
-              }
+              if (Acc_received[j].WADR == Weichenadresse) { Paket_bekannt_A++; }
+              if (Acc_received[j].DIR == Direction) { Paket_bekannt_A++; }
+              if (Acc_received[j].POW == Power) { Paket_bekannt_A++; }
 
               if (Paket_bekannt_A == 3) {
 #ifdef debug
@@ -796,6 +689,7 @@ void notifyDccMsg(DCC_MSG* Msg)
               {
                 // Befehl mit der gleichen Adresse aus der Puffertabelle löschen!
                 // dazu beginnend mit der Zeile j alle weiter hinten vorziehen, bis Pufferende oder mindestens bis Acc_counter
+
                 for (byte k = j; k < min(Acc_counter, bufferSizeAcc - 1); k++) {
                   Acc_received[k].WADR = Acc_received[k + 1].WADR;
                   Acc_received[k].DIR = Acc_received[k + 1].DIR;
@@ -897,14 +791,47 @@ void notifyDccMsg(DCC_MSG* Msg)
         if (bitRead(Befehls_Byte, 3)) SerialBT.print(" On ");
         else SerialBT.print(" Off");
         print_spaces(37);
-      } else  // Accessory Extended NMRA --> noch nicht getestet !!!
+      } else
+      // Accessory Extended NMRA --> angepasste Version noch nicht getestet !!!
+      // extended Befehle bestehen aus 4 Bytes (incl. Checkbyte)
+      // Byte 1 und 2 enthalten die Adresse, Byte 3 den eigentlichen Befehl
+      // die Adresse berechnet sich wie beim Basis Accessory Befehl !
       {
+        z_acc++;
         SerialBT.print("Acc Ext ");
-        decoderAddress = (decoderAddress << 5) + ((Befehls_Byte & 0b01110000) >> 2) + ((Befehls_Byte & 0b00000110) >> 1);
+
+        decoderAddress = (((~Befehls_Byte) & 0b01110000) << 2) + decoderAddress;  // das ist die DCC-Adresse des Dekoders
+        Ausgang = (Befehls_Byte & 0b00000110) >> 1;                               // entspricht 0 - 3 bzw. Ausgang 1 - 4 eines Dekoders
+
+        Weichenadresse = (decoderAddress - 1) * 4 + Ausgang + 1;  // das ist die DCC-Adresse des Schaltartikels
+        Direction = (bitRead(Befehls_Byte, 0));                   // Richtung A/B
+        Power = (bitRead(Befehls_Byte, 3));                       // Power on/off
+
+        SerialBT.print(F("DCC-Adresse "));
+        if (Weichenadresse < 1000) SerialBT.print(" ");
+        if (Weichenadresse < 100) SerialBT.print(" ");
+        if (Weichenadresse < 10) SerialBT.print(" ");
+        SerialBT.print(Weichenadresse);
+        SerialBT.print(" (");
+
+        if (decoderAddress < 100) SerialBT.print(" ");
+        if (decoderAddress < 10) SerialBT.print(" ");
         SerialBT.print(decoderAddress);
-        SerialBT.print(" Asp ");
-        SerialBT.print(Msg->Data[2], BIN);
+        SerialBT.print(" : ");
+        SerialBT.print(Ausgang + 1);
+        SerialBT.print(")");
+
+        if (!bitRead(Befehls_Byte, 0)) SerialBT.print(" A");
+        else SerialBT.print(" B");
+
+        if (bitRead(Befehls_Byte, 3)) SerialBT.print(" On ");
+        else SerialBT.print(" Off");
+        print_spaces(37);
+
+        SerialBT.print(" Asp / 3. Byte: ");
+        Byte_to_Bits(Msg->Data[2]);
       }
+
       printPacket(Msg);
     }
 
@@ -916,50 +843,51 @@ void notifyDccMsg(DCC_MSG* Msg)
       z_acc_cv++;
 
       /*  ECOS: POM-Schaltartikel POM-Adresse 12, CV 6, Wert 20 Schreiben:  (6 Bytes ohne Präambel und Trennbits!)
-                Byte 0   Byte 1   Byte 2   Byte 3   Byte 4   Byte 5
-                10001100 11110000 11101100 -----101 ---10100 10000001
-                          ___                                                  3 MSB der Adresse sind invertiert !
-                10AAAAAA 1AAACDDD 1110CCVV VVVVVVVV DDDDDDDD EEEEEEEE
-                    11 = Adresse 12
-                                      11 = Schreiben
-                                      10 = Lesen
-                                        V = CV + 1 --> 5 + 1 = 6
-                                                       20
-                Lesen:
-                10001100 11110000 11100100 -----101 -------0 10011101
+                        Byte 0   Byte 1   Byte 2   Byte 3   Byte 4   Byte 5
+                        10001100 11110000 11101100 -----101 ---10100 10000001
+                                  ___                                                  3 MSB der Adresse sind invertiert !
+                        10AAAAAA 1AAACDDD 1110CCVV VVVVVVVV DDDDDDDD EEEEEEEE
+                            11 = Adresse 12
+                                              11 = Schreiben
+                                              10 = Lesen
+                                                V = CV + 1 --> 5 + 1 = 6
+                                                               20
+                        Lesen:
+                        10001100 11110000 11100100 -----101 -------0 10011101
 
-                Bas.Op.Mode.Prog [preamble]0[10AAAAAA]0[1AAACDDD]0[CVACCESS]0[EEEEEEEE]1
-                AAAAAA AAA1DDD = Output Address
-                AAAAAA AAA0000 = Decoder Address
-                CVACCESS = DCC Programming CMD
-                EEEEEEEE = Checksum
+                        Bas.Op.Mode.Prog [preamble]0[10AAAAAA]0[1AAACDDD]0[CVACCESS]0[EEEEEEEE]1
+                        AAAAAA AAA1DDD = Output Address
+                        AAAAAA AAA0000 = Decoder Address
+                        CVACCESS = DCC Programming CMD
+                        EEEEEEEE = Checksum
 
-                CVACCESS [1110CCVV]0[VVVVVVVV]0[DDDDDDDD]
-                CC = Command
-                CC = 01 Verify Byte
-                CC = 11 Write Byte
-                CC = 10 Bit Manipulation
-                VV VVVVVVVV = CV Number
-                DDDDDDDD = New Value
-                EEEEEEEE = Checksum
-            */
+                        CVACCESS [1110CCVV]0[VVVVVVVV]0[DDDDDDDD]
+                        CC = Command
+                        CC = 01 Verify Byte
+                        CC = 11 Write Byte
+                        CC = 10 Bit Manipulation
+                        VV VVVVVVVV = CV Number
+                        DDDDDDDD = New Value
+                        EEEEEEEE = Checksum
+                    */
 
-      decoderAddress = (((~Msg->Data[1]) & 0b01110000) << 2) + (Msg->Data[0] & 0b00111111);  // Adresse ist in 2 Bytes kodiert, MSB invertiert in Byte1 (Bit4-6) und der Rest in Byte0 (Bit 0-5)
-      command = Msg->Data[2] & 0b00001100;                                                   // 2 Bits enthalten den Schreib-/ Verify-Befehl etc.
-      CV_address = ((Msg->Data[2] & 0b00000011) * 256) + Msg->Data[3] + 1;                   // Nummer der CV
-      CV_value = Msg->Data[4];                                                               // CV-Wert für das Schreiben
+      decoderAddress = (((~Msg->Data[1]) & 0b01110000) << 2)
+                       + (Msg->Data[0] & 0b00111111);                       // Adresse ist in 2 Bytes kodiert, MSB invertiert in Byte1 (Bit4-6) und der Rest in Byte0 (Bit 0-5)
+      command = Msg->Data[2] & 0b00001100;                                  // 2 Bits enthalten den Schreib-/ Verify-Befehl etc.
+      CV_address = ((Msg->Data[2] & 0b00000011) * 256) + Msg->Data[3] + 1;  // Nummer der CV
+      CV_value = Msg->Data[4];                                             // CV-Wert für das Schreiben
 
       if (!(((decoderAddress == decoderAddress_alt) && (CV_address == CV_address_alt) && (command == command_alt)) && puffern_CV))  // immer ausgeben
       {
         switch (command) {
-          case 12:  //B1100 --> 12 ==> Schreiben
+          case 12:  // B1100 --> 12 ==> Schreiben
 
-            SerialBT.print(F("Acc   "));
-            if (decoderAddress < 100) SerialBT.print(" ");
-            if (decoderAddress < 10) SerialBT.print(" ");
+            SerialBT.print(F("Acc    "));
             SerialBT.print(decoderAddress);
+            if (decoderAddress < 100) SerialBT.print("  ");
+            if (decoderAddress < 10) SerialBT.print("  ");
 
-            SerialBT.print("   CV ");
+            SerialBT.print(" CV ");
             SerialBT.print(CV_address);
             SerialBT.print(" ");
             if (CV_address < 100) SerialBT.print(" ");
@@ -973,14 +901,14 @@ void notifyDccMsg(DCC_MSG* Msg)
             print_spaces(33);
             break;
 
-          case 4:  //B0100 -->  4 ==> Lesen
+          case 4:  // B0100 -->  4 ==> Lesen
 
-            SerialBT.print(F("Acc   "));
+            SerialBT.print(F("Acc    "));
+            SerialBT.print(decoderAddress);
             if (decoderAddress < 100) SerialBT.print(" ");
             if (decoderAddress < 10) SerialBT.print(" ");
-            SerialBT.print(decoderAddress);
 
-            SerialBT.print("   CV ");
+            SerialBT.print("  CV ");
             SerialBT.print(CV_address);
             SerialBT.print(" ");
             if (CV_address < 100) SerialBT.print(" ");
@@ -989,7 +917,7 @@ void notifyDccMsg(DCC_MSG* Msg)
             print_spaces(42);
             break;
 
-          case 8:  //B1000 ==> Bit-Gefummel !
+          case 8:  // B1000 ==> Bit-Gefummel !
 
             // ... 111K-DBBB EEEE-EEEE --> Zugriffe auf einzelne Bits
             // K = 1 – Bit Schreiben
@@ -1022,41 +950,41 @@ void notifyDccMsg(DCC_MSG* Msg)
   else if (decoderType == 0)  // --> Lok / Funktionsdekoder
   {
     /*  Aufbau der Fahrbefehle:
-            Fahrbefehl, kurze Adressen
-                Byte 7 6 5 4 3 2 1 0
-                ---------------------------------------------------------------------------
-                0    0 A A A A A A A    Adresse 7 Bit
-                1    0 1 R S S S S S    R = Fahrtrichtung, Sn = Geschwindigkeit 28 Stufen
-                2          XOR          Prüfbyte
+                Fahrbefehl, kurze Adressen
+                    Byte 7 6 5 4 3 2 1 0
+                    ---------------------------------------------------------------------------
+                    0    0 A A A A A A A    Adresse 7 Bit
+                    1    0 1 R S S S S S    R = Fahrtrichtung, Sn = Geschwindigkeit 28 Stufen
+                    2          XOR          Prüfbyte
 
-                0    0 A A A A A A A    Adresse 7 Bit
-                1    0 0 1 1 1 1 1 1    Befehlsbyte 0x3F
-                2    R S S S S S S S    R = Fahrtrichtung, Sn = Geschwindigkeit 127 Stufen
-                3          XOR          Prüfbyte
+                    0    0 A A A A A A A    Adresse 7 Bit
+                    1    0 0 1 1 1 1 1 1    Befehlsbyte 0x3F
+                    2    R S S S S S S S    R = Fahrtrichtung, Sn = Geschwindigkeit 127 Stufen
+                    3          XOR          Prüfbyte
 
-                - Fahrbefehl 28 Stufen: unsigned char speed = ((Byte[1] & 0x0F) << 1) + ((Byte[1] & 0x10) >> 4);
-                - Fahrbefehl 127 Stufen: unsigned char speed = Byte[2] & 0x7F;
+                    - Fahrbefehl 28 Stufen: unsigned char speed = ((Byte[1] & 0x0F) << 1) + ((Byte[1] & 0x10) >> 4);
+                    - Fahrbefehl 127 Stufen: unsigned char speed = Byte[2] & 0x7F;
 
-                Fahrbefehl, lange Adressen
-                Byte 7 6 5 4 3 2 1 0
-                ---------------------------------------------------------------------------
-                0    1 1 A A A A A A    Adresse 6 Bit
-                1    A A A A A A A A    Adresse 8 Bit
-                2    0 1 R S S S S S    R = Fahrtrichtung, Sn = Geschwindigkeit 28 Stufen
-                3          XOR          Prüfbyte
+                    Fahrbefehl, lange Adressen
+                    Byte 7 6 5 4 3 2 1 0
+                    ---------------------------------------------------------------------------
+                    0    1 1 A A A A A A    Adresse 6 Bit
+                    1    A A A A A A A A    Adresse 8 Bit
+                    2    0 1 R S S S S S    R = Fahrtrichtung, Sn = Geschwindigkeit 28 Stufen
+                    3          XOR          Prüfbyte
 
-                Byte 7 6 5 4 3 2 1 0
-                ---------------------------------------------------------------------------
-                0    1 1 A A A A A A    Adresse 6 Bit
-                1    A A A A A A A A    Adresse 8 Bit
-                2    0 0 1 1 1 1 1 1    Befehlsbyte 0x3F
-                3    R S S S S S S S    R = Fahrtrichtung, Sn = Geschwindigkeit 127 Stufen
-                4          XOR          Prüfbyte
+                    Byte 7 6 5 4 3 2 1 0
+                    ---------------------------------------------------------------------------
+                    0    1 1 A A A A A A    Adresse 6 Bit
+                    1    A A A A A A A A    Adresse 8 Bit
+                    2    0 0 1 1 1 1 1 1    Befehlsbyte 0x3F
+                    3    R S S S S S S S    R = Fahrtrichtung, Sn = Geschwindigkeit 127 Stufen
+                    4          XOR          Prüfbyte
 
-                - Fahrbefehl 28 Stufen: unsigned char speed = ((Byte[2] & 0x0F) << 1) + ((Byte[2] & 0x10) >> 4);
-                - Fahrbefehl 127 Stufen: unsigned char speed = Byte[3] & 0x7F;
+                    - Fahrbefehl 28 Stufen: unsigned char speed = ((Byte[2] & 0x0F) << 1) + ((Byte[2] & 0x10) >> 4);
+                    - Fahrbefehl 127 Stufen: unsigned char speed = Byte[3] & 0x7F;
 
-        */
+            */
     if (Anzeige_Loks)
     // zu Testzwecken filtern auf bestimmte Lok-Adresse
     // if (Anzeige_Loks && (decoderAddress == 42 || decoderAddress == 888))
@@ -1065,14 +993,14 @@ void notifyDccMsg(DCC_MSG* Msg)
       byte instructionType = Befehls_Byte >> 5;
 
       /*  Bits 7-6-5 sind relevant, ergibt 0 - 7 =  8 unterschiedliche Befehlstypen
-                0 = Control ??
-                1 = 0011-1111 128 Geschwindigkeitsstufen-Befehl, 0011-1110 Sonderbetriebsarten-Befehl
-                2 = 01xx-xxxx Basis Geschwindigkeits- und Richtungsbefehl rückwärts 28 Stufen
-                3 = 01xx-xxxx Basis Geschwindigkeits- und Richtungsbefehl vorwärts  28 Stufen
-                4 = Lok Funktionen F0, F1 - F4
-                5 = Lok-Funktionen F5 - F12
-                6 = Lok-Funktionen F13 - F36
-                7 = CVs                                 */
+                        0 = Control ??
+                        1 = 0011-1111 128 Geschwindigkeitsstufen-Befehl, 0011-1110 Sonderbetriebsarten-Befehl
+                        2 = 01xx-xxxx Basis Geschwindigkeits- und Richtungsbefehl rückwärts 28 Stufen
+                        3 = 01xx-xxxx Basis Geschwindigkeits- und Richtungsbefehl vorwärts  28 Stufen
+                        4 = Lok Funktionen F0, F1 - F4
+                        5 = Lok-Funktionen F5 - F12
+                        6 = Lok-Funktionen F13 - F36
+                        7 = CVs                                 */
 
       if (puffern_Lok) {
 #ifdef debug
@@ -1110,15 +1038,9 @@ void notifyDccMsg(DCC_MSG* Msg)
             SerialBT.print(Funktion, HEX);
             SerialBT.println(" | ");
 #endif
-            if (Lok_received[j].ADR == decoderAddress) {
-              Paket_bekannt_L++;
-            }
-            if (Lok_received[j].ORDER == Befehl) {
-              Paket_bekannt_L++;
-            }
-            if (Lok_received[j].FUNC == Funktion) {
-              Paket_bekannt_L++;
-            }
+            if (Lok_received[j].ADR == decoderAddress) { Paket_bekannt_L++; }
+            if (Lok_received[j].ORDER == Befehl) { Paket_bekannt_L++; }
+            if (Lok_received[j].FUNC == Funktion) { Paket_bekannt_L++; }
 
             if (Paket_bekannt_L == 3) {
 #ifdef debug
@@ -1266,9 +1188,9 @@ void notifyDccMsg(DCC_MSG* Msg)
           // Advanced Operations
           // 001x-xxxx
 
-          if (Befehls_Byte == 0b00111111)  //128 speed steps
+          if (Befehls_Byte == 0b00111111)  // 128 speed steps
           {
-            //0011-1111 128 Geschwindigkeitsstufen-Befehl
+            // 0011-1111 128 Geschwindigkeitsstufen-Befehl
 
             // Richtung auswerten Bit 7 "R" im vorletzten Byte
             if (bitRead(Msg->Data[pktByteCount - 2], 7)) SerialBT.print("  -->> ");
@@ -1287,9 +1209,9 @@ void notifyDccMsg(DCC_MSG* Msg)
             print_spaces(25);
           }
           //-----------------------------------------------------------------------------------------------------------------------------------------------------------------
-          else if (Befehls_Byte == 0b00111110)  //Speed Restriction
+          else if (Befehls_Byte == 0b00111110)  // Speed Restriction
           {
-            //0011-1110 Sonderbetriebsarten-Befehl
+            // 0011-1110 Sonderbetriebsarten-Befehl
             if (bitRead(Msg->Data[pktByteCount - 2], 7)) SerialBT.print(" On ");
             else SerialBT.print(" Off ");
             SerialBT.print(Msg->Data[pktByteCount - 1]) & 0b01111111;
@@ -1299,19 +1221,20 @@ void notifyDccMsg(DCC_MSG* Msg)
           // NEU 12.12.2020
           else if (Befehls_Byte == 0b00111101) {
             /*
-                             Analogfunktionsgruppe
+                                             Analogfunktionsgruppe
 
-                             Dieser Befehl ist drei Byte lang und hat das Format: 0011-1101 SSSS-SSSS DDDD-DDDD
-                             Er ist bestimmt, um bis zu 256 Analogkanäle zu steuern. Dabei legt SSSS-SSSS im zweiten Befehlsbyte den Analogfunktionsausgang (Steuerkanal) (0-255) und das dritte
-                             Befehlsbyte DDDD-DDDD die Analogfunktionsdaten Daten (0-255) fest.
+                                             Dieser Befehl ist drei Byte lang und hat das Format: 0011-1101 SSSS-SSSS DDDD-DDDD
+                                             Er ist bestimmt, um bis zu 256 Analogkanäle zu steuern. Dabei legt SSSS-SSSS im zweiten Befehlsbyte den Analogfunktionsausgang (Steuerkanal) (0-255) und
+                                           das dritte Befehlsbyte DDDD-DDDD die Analogfunktionsdaten Daten (0-255) fest.
 
-                             Verwendung der Analogausgänge:
-                             SSSS-SSSS = 0000-0001 - Lautstärkesteuerung
-                             SSSS-SSSS = 0001-0000 bis 0001-1111 - Positionssteuerung
+                                             Verwendung der Analogausgänge:
+                                             SSSS-SSSS = 0000-0001 - Lautstärkesteuerung
+                                             SSSS-SSSS = 0001-0000 bis 0001-1111 - Positionssteuerung
 
-                             Alle oben nicht definierten Werte von SSSS-SSSS zwischen 0000-0000 und 0111-1111 einschließlich sind reserviert.
-                             Die Werte von 1000-0000 bis 1111-1111 können beliebig verwendet werden. Diese Funktion darf nicht zur Geschwindigkeitssteuerung eines Fahrzeugdecoders verwendet werden.
-                        */
+                                             Alle oben nicht definierten Werte von SSSS-SSSS zwischen 0000-0000 und 0111-1111 einschließlich sind reserviert.
+                                             Die Werte von 1000-0000 bis 1111-1111 können beliebig verwendet werden. Diese Funktion darf nicht zur Geschwindigkeitssteuerung eines Fahrzeugdecoders
+                                           verwendet werden.
+                                        */
             SerialBT.print("  Analogfkt.gruppe Steuerkanal ");
             if (Msg->Data[2] < 100) SerialBT.print(" ");
             if (Msg->Data[2] < 10) SerialBT.print(" ");
@@ -1379,7 +1302,7 @@ void notifyDccMsg(DCC_MSG* Msg)
           //-----------------------------------------------------------------------------------------------------------------------------------------------------------------
           else  // Loc Function 12-11-10-9
           {
-            //1010-xxxx Funktionssteuerung F9-F12
+            // 1010-xxxx Funktionssteuerung F9-F12
 
             for (byte k = 0; k < 4; k++) {
               if (k == 0) SerialBT.print(" ");
@@ -1422,7 +1345,7 @@ void notifyDccMsg(DCC_MSG* Msg)
               break;
             //-----------------------------------------------------------------------------------------------------------------------------------------------------------------
             case 0b00011111:  // F21-F28 Function Control
-              //1101-1111 Funktionssteuerung F21-F28
+              // 1101-1111 Funktionssteuerung F21-F28
 
               for (byte k = 0; k < 8; k++) {
                 if (bitRead(Funktion, k)) SerialBT.print("  F");
@@ -1432,7 +1355,7 @@ void notifyDccMsg(DCC_MSG* Msg)
               break;
             //-----------------------------------------------------------------------------------------------------------------------------------------------------------------
             case 0b00011000:  // F29-F36 Function Control
-              //1101-1000 Funktionssteuerung F29 - F36
+              // 1101-1000 Funktionssteuerung F29 - F36
               for (byte k = 0; k < 8; k++) {
                 if (bitRead(Funktion, k)) SerialBT.print("  F");
                 else SerialBT.print("  f");
@@ -1463,19 +1386,20 @@ void notifyDccMsg(DCC_MSG* Msg)
               //-----------------------------------------------------------------------------------------------------------------------------------------------------------------
               case 0b00001001:
                 /*
-                                    D.2 "Service Mode Decoder Lock Instruction"
-                                        Dieser Befehl wird in der Technical Note TN-1-05 der NMRA näher beschrieben.
-                                        Die "Service Mode Decoder Lock Instruction" (SMDLI) verhindert die Programmierung einiger Decoder, während andere auf dem
-                                        gleichen Gleis programmiert werden können. Es werden dazu Befehle für den Programmiermodus auf dem normalen Fahrgleis verwendet,
-                                        womit man nicht den Vorteil der strombegrenzten Testumgebung hat und Decoder, die diesen Befehl nicht unterstützen, ungewollt umprogrammiert werden können.
+                                                        D.2 "Service Mode Decoder Lock Instruction"
+                                                            Dieser Befehl wird in der Technical Note TN-1-05 der NMRA näher beschrieben.
+                                                            Die "Service Mode Decoder Lock Instruction" (SMDLI) verhindert die Programmierung einiger Decoder, während andere auf dem
+                                                            gleichen Gleis programmiert werden können. Es werden dazu Befehle für den Programmiermodus auf dem normalen Fahrgleis verwendet,
+                                                            womit man nicht den Vorteil der strombegrenzten Testumgebung hat und Decoder, die diesen Befehl nicht unterstützen, ungewollt umprogrammiert
+                                                       werden können.
 
-                                    Das Befehlsformat lautet: {20 Synchronbits} 0 0000-0000 0 1111-1001 0 0AAA-AAAA 0 PPPP-PPPP 1
+                                                        Das Befehlsformat lautet: {20 Synchronbits} 0 0000-0000 0 1111-1001 0 0AAA-AAAA 0 PPPP-PPPP 1
 
-                                    Dabei steht das AAA-AAAA für die kurze Adresse des Decoders, der weiterhin Befehle des Programmiermodus ausführen wird.
-                                    Ein Decoder, der diesen Befehl unterstützt, vergleicht seine Adresse in CV #1 gegen die Adresse in dem Befehl.
-                                    Stimmen die Adressen nicht überein, geht er in einen gesperrten Zustand über, in dem er auch nach Aus- und wieder Einschalten der
-                                    Spannung verbleibt. In diesem Zustand ignoriert er alle Befehle des Programmiermodus.
-                                */
+                                                        Dabei steht das AAA-AAAA für die kurze Adresse des Decoders, der weiterhin Befehle des Programmiermodus ausführen wird.
+                                                        Ein Decoder, der diesen Befehl unterstützt, vergleicht seine Adresse in CV #1 gegen die Adresse in dem Befehl.
+                                                        Stimmen die Adressen nicht überein, geht er in einen gesperrten Zustand über, in dem er auch nach Aus- und wieder Einschalten der
+                                                        Spannung verbleibt. In diesem Zustand ignoriert er alle Befehle des Programmiermodus.
+                                                    */
                 SerialBT.print(F("Decoder Lock "));
                 SerialBT.print(Msg->Data[pktByteCount - 1]);
                 break;
@@ -1493,10 +1417,10 @@ void notifyDccMsg(DCC_MSG* Msg)
 
             switch (Befehls_Byte & 0b00001100) {
               /*  Die für den Befehlstyp (xxxx-KKxx) im ersten Befehlsbyte festgelegten Werte sind:
-                                  KK = 00 – reserviert
-                                  KK = 01 – Byte Überprüfen
-                                  KK = 11 – Byte Schreiben
-                                  KK = 10 – Bit Manipulation */
+                                                      KK = 00 – reserviert
+                                                      KK = 01 – Byte Überprüfen
+                                                      KK = 11 – Byte Schreiben
+                                                      KK = 10 – Bit Manipulation */
 
               //-----------------------------------------------------------------------------------------------------------------------------------------------------------------
               case 0b00000100:  // Lesen Byte
@@ -1517,7 +1441,7 @@ void notifyDccMsg(DCC_MSG* Msg)
                 break;
 
               //-----------------------------------------------------------------------------------------------------------------------------------------------------------------
-              case 0b00001000:  //B1000 ==> Bit-Gefummel !
+              case 0b00001000:  // B1000 ==> Bit-Gefummel !
 
                 // ... 111K-DBBB EEEE-EEEE --> Zugriffe auf einzelne Bits
                 // K = 1 – Bit Schreiben
@@ -1578,7 +1502,6 @@ void print_spaces(byte b)
   }
 }
 
-
 //-------------------------------------------------------------------------------------------------------
 void Lokname(unsigned int DCC_Adresse)
 //-------------------------------------------------------------------------------------------------------
@@ -1630,9 +1553,8 @@ void print_Zahl_rechts_ln(unsigned long zahl)
   SerialBT.println(zahl);
 }
 
-
 //-------------------------------------------------------------------------------------------------------
-void printPacket(DCC_MSG* Msg)
+void printPacket(DCC_MSG *Msg)
 //-------------------------------------------------------------------------------------------------------
 // Gibt alle gefundenen Bytes eines DCC-Befehls aus, ohne Präambel, ohne Prüfbyte
 {
@@ -1643,4 +1565,193 @@ void printPacket(DCC_MSG* Msg)
     Byte_to_Bits(Msg->Data[n]);
   }
   SerialBT.println(" ");
+}
+
+//--------------------------
+void Receive_serial_command()
+//--------------------------
+// Liest ein oder mehrere Zeichen aus der seriellen Schnittstelle und stellt die Infos in einem "Buffer" zur Verfügung
+// Bei "Enter" (\n) wird die Routine zur Auswertung aufgerufen
+{
+  static char Buffer[20] = "";
+  if (SerialBT.available() > 0) {
+    char c = SerialBT.read();
+    switch (c) {
+      case '\n':  // Proc buffer       (For tests with the serial console of Arduino use "Neue Zeile" and not "..(CR)" )
+        SerialBT.print(F("\nCmd: "));
+        SerialBT.println(Buffer);
+        Proc_Cmd(Buffer);
+        Buffer[0] = '\0';
+        break;
+
+      default:  // Add character to buffer
+        {
+          uint8_t len = strlen(Buffer);
+          if (len < sizeof(Buffer) - 1) {
+            Buffer[len++] = c;
+            Buffer[len] = '\0';
+          } else {
+            *Buffer = '\0';
+            // SerialBT.println(F("Buffer overflow"));
+          }
+        }
+    }
+  }
+}
+
+//----------------------------
+void Proc_Cmd(const char *Cmd)
+//----------------------------
+// verarbeitet die Eingaben über die serielle Schnittstelle
+{
+
+  // Tastatur-Befehle via seriellen Monitor des Arduinos:
+
+  // 1 = Anzeige Loks ein/aus
+  // 2 = Anzeige Zubehör ein/aus
+  // 3 = Anzeige CV-Befehle ein/aus
+  // 4 = Nur neue Lok-Pakete ein/aus
+  // 5 = Nur neue Zubehör-Pakete ein/aus
+  // 6 = Nur neue CV-Befehle ein/aus
+  // l = Filtern Lokadresse        lnnnn --> zeigt nur Befehle für Adresse #nnnn an, l ohne weitere Angaben setzt den Filter zurück
+  // z = Filtern Zubehöradresse    znnnn --> zeigt nur Befehle für Adresse #nnnn an, z ohne weitere Angaben setzt den Filter zurück
+  // 7 = Statistik
+  // ? = Befehle anzeigen
+
+  switch (*Cmd) {
+    case '1':
+      SerialBT.print(F("1 Anzeige Loks ein/aus = "));
+      Anzeige_Loks = !Anzeige_Loks;
+      if (Anzeige_Loks) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      break;
+
+    case '2':
+      SerialBT.print(F("2 Anzeige Zubehör ein/aus = "));
+      Anzeige_Acc = !Anzeige_Acc;
+      if (Anzeige_Acc) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      break;
+
+    case '3':
+      SerialBT.print(F("3 Anzeige CV-Befehle ein/aus = "));
+      Anzeige_CV = !Anzeige_CV;
+      if (Anzeige_CV) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      break;
+
+    case '4':
+      SerialBT.print(F("4 Nur neue Lok-Pakete anzeigen ein/aus = "));
+      puffern_Lok = !puffern_Lok;
+      if (puffern_Lok) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      break;
+
+    case '5':
+      SerialBT.print(F("5 Nur neue Zubehör-Pakete anzeigen ein/aus = "));
+      puffern_Acc = !puffern_Acc;
+      if (puffern_Acc) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      break;
+
+    case '6':
+      SerialBT.print(F("6 Nur neue CV-Befehle anzeigen ein/aus = "));
+      puffern_CV = !puffern_CV;
+      if (puffern_CV) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      break;
+
+    case 'l':
+      Lok_Filter = atoi(Cmd + 1);  // Filter auf eingegebene Lokadresse setzen
+      break;
+
+    case 'z':
+      Acc_Filter = atoi(Cmd + 1);  // Filter auf eingegebene Accessory-Dekoder-Adresse setzen
+      break;
+
+    case '7':
+      SerialBT.println();
+      SerialBT.println(F("S t a t i s t i k"));
+      SerialBT.println(F("-----------------"));
+      SerialBT.print(F("Zeitraum [sec]         :"));
+      print_Zahl_rechts_ln((millis() - start_time) / 1000);
+
+      SerialBT.print(F("Anzahl empfangene Bytes:"));
+      print_Zahl_rechts_ln(z_bytes);
+      SerialBT.print(F("Gültige Kommandos      :"));
+      print_Zahl_rechts_ln(z_invalid + z_idle + z_lok_speed + z_lok_F0 + z_lok_F5 + z_lok_F9 + z_lok_F13 + z_lok_F21 + z_lok_F29 + z_acc + z_dec_reset + z_acc_cv + z_lok_cv + z_prg_CV);
+      SerialBT.print(F("Ungültige Kommandos    :"));
+      print_Zahl_rechts_ln(z_invalid);
+      SerialBT.print(F("Idle-Pakete            :"));
+      print_Zahl_rechts_ln(z_idle);
+
+      SerialBT.print(F("Geschwindigkeitsbefehle:"));
+      print_Zahl_rechts_ln(z_lok_speed);
+      SerialBT.print(F("F0 - F4 Funktionen     :"));
+      print_Zahl_rechts_ln(z_lok_F0);
+      SerialBT.print(F("F5 - F8 Funktionen     :"));
+      print_Zahl_rechts_ln(z_lok_F5);
+      SerialBT.print(F("F9 - F12 Funktionen    :"));
+      print_Zahl_rechts_ln(z_lok_F9);
+      SerialBT.print(F("F13 - F20 Funktionen   :"));
+      print_Zahl_rechts_ln(z_lok_F13);
+      SerialBT.print(F("F21 - F28 Funktionen   :"));
+      print_Zahl_rechts_ln(z_lok_F21);
+      SerialBT.print(F("F29 - F36 Funktionen   :"));
+      print_Zahl_rechts_ln(z_lok_F29);
+
+      SerialBT.print(F("Spezialbefehle Lok     :"));
+      print_Zahl_rechts_ln(z_spezial);
+
+      SerialBT.print(F("Zubehör-Befehle        :"));
+      print_Zahl_rechts_ln(z_acc);
+
+      SerialBT.print(F("Dekoder-Reset-Befehle  :"));
+      print_Zahl_rechts_ln(z_dec_reset);
+      SerialBT.print(F("Zubehör-CV-Befehle     :"));
+      print_Zahl_rechts_ln(z_acc_cv);
+      SerialBT.print(F("Lok-CV-Befehle         :"));
+      print_Zahl_rechts_ln(z_lok_cv);
+      SerialBT.print(F("Programmiergleisbefehle:"));
+      print_Zahl_rechts_ln(z_prg_CV);
+      SerialBT.print(F("Acknowledgments        :"));
+      print_Zahl_rechts_ln(z_ack);
+
+      SerialBT.print(F("Counter Lok            :"));
+      print_Zahl_rechts_ln(Lok_counter);
+      SerialBT.print(F("Counter Acc            :"));
+      print_Zahl_rechts_ln(Acc_counter);
+      break;
+
+    case '?':
+      SerialBT.println();
+      SerialBT.println(F("Tastaturbefehle für den seriellen Monitor:"));
+      SerialBT.println();
+      SerialBT.print(F("1     = Anzeige Loks ein/aus                     "));
+      if (Anzeige_Loks) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      SerialBT.print(F("2     = Anzeige Zubehör ein/aus                  "));
+      if (Anzeige_Acc) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      SerialBT.print(F("3     = Anzeige CV-Befehle ein/aus               "));
+      if (Anzeige_CV) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      SerialBT.print(F("4     = Nur neue Lok-Pakete anzeigen ein/aus     "));
+      if (puffern_Lok) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      SerialBT.print(F("5     = Nur neue Zubehör-Pakete anzeigen ein/aus "));
+      if (puffern_Acc) SerialBT.println("ein");
+      else SerialBT.println("aus");
+      SerialBT.print(F("6     = Nur neue CV-Befehle ein/aus              "));
+      if (puffern_CV) SerialBT.println("ein");
+      else SerialBT.println("aus");
+
+      SerialBT.println(F("lnnnn = Lokadresse filtern, nnnn = Adresse"));
+      SerialBT.println(F("znnnn = Zubehöradresse filtern, nnnn = Adresse"));
+
+      SerialBT.println(F("7     = Statistik anzeigen"));
+      SerialBT.println(F("?     = Befehle anzeigen"));
+      break;
+  }
+  SerialBT.println();
 }
