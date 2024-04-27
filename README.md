@@ -6,3 +6,13 @@ Fork des o. g. Monitor von Domapi.
 
 
 Benutzung für private Zwecke frei, Änderungen bitte mit dem ursprünglichen Ersteller Domapi abstimmen.
+
+## ESP32 Wiring
+```
+ESP 32 Pin | Optokoppler-Modu-Pin
+-----------+---------------------
+  27       |  SIG
+  25       |  LED
+  3.3V     |  VDD
+  GND      |  GND
+```
