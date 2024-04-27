@@ -55,15 +55,28 @@
       Pin 6 Optokoppler mit 10 kOhm an 5V reicht aus. Pin 7 muss nicht an 5V angeschlossen sein, er kann unbelegt bleiben.
     - ACK-Signal über Optokoppler CNY17 und Transistor BC557 anschließen, erzeugt Stromimpuls an +/- des Brückengleichrichters.
 
-ESP32: Pin 27 an Optokoppler-Ausgang des 6N137
-       Pin 26 ist der ACK-Pin
+Ergänzungen/Änderungen 2024-04 (Thomas Borrmann)
+ESP32 Wiring
+ESP 32 Pin | Optokoppler-Modu-Pin
+-----------+---------------------
+  27       |  SIG
+  25       |  LED
+  3.3V     |  VDD
+  GND      |  GND
+
+Code: 
+    - App-Version u. Device-Name in Konstanten ausgelagert
+    - LED-Builtin in #define ausgelagert
+    - Redefinition des min(...)-Makros wg. Compilerfehler auf ESP32
+    - Ausgabe SerialBT anstelle Serial
+    - Blinker-LED kann auf HIGH (Standard) oder LOW aktiviert werden
 */
 //-------------------------------------------------------------------------------------------------------
 
 #include <NmraDcc.h>
 #include "BluetoothSerial.h"  // für ESP32
 
-const char *app_version = "1.5.1";
+const char *app_version = "1.5.2";
 const char *device_name = "ESP32-DCC-Monitor";
 
 // workaround for compiler error
@@ -81,6 +94,16 @@ inline int min(uint32_t a, unsigned int b) {
 // Check ob Bluetooth Serial verfuegbar
 #if defined(CONFIG_BT_ENABLED) && defined(CONFIG_BLUEDROID_ENABLED) && defined(CONFIG_BT_SPP_ENABLED)
 BluetoothSerial SerialBT;
+#endif
+
+#define BLINKER_LOW_ACTIVE 1  // LED für DCC-Signal ist LOW-Aktiv
+
+#ifdef ESP32
+  #define IRQ_PIN 27 // ESP32
+  #define ACK_PIN 26 // ESP32
+#else
+  #define IRQ_PIN 2 // Arduino nano
+  #define ACK_PIN 5 // Arduino nano
 #endif
 
 NmraDcc Dcc;
@@ -101,10 +124,8 @@ byte puffern_CV = 1;
 uint16_t Lok_Filter, Acc_Filter;  // Werte für die Filterung des DCC-Datenstroms. Es werden dann nur Befehle für diese Adressen gezeigt
 //-------------------------------------------------------------------------------------------------------
 
-// const byte DccInterruptPin = 2; // Arduino
-// const byte DccAckPin = A5;  // Arduino-Pin zur Erzeugung eines ACK-Signals
-const byte DccInterruptPin = 27;  // ESP 32
-const byte DccAckPin = 26;        // ESP 32  - Pin zur Erzeugung eines ACK-Signals
+const byte DccInterruptPin = IRQ_PIN;  // Pin für IRQ
+const byte DccAckPin = ACK_PIN;        // Pin zur Erzeugung eines ACK-Signals
 const char *comp_date = __DATE__ ", " __TIME__;
 
 int blinker_aus = 10000;  // toggelt die LED an Pin 13, wenn ein DCC-Paket gefunden wurde --> zeigt DCC-Signal an
@@ -226,7 +247,11 @@ void loop()
   // LED ausschalten
   blinker_aus--;
   if (blinker_aus == 0) {
+#ifndef BLINKER_LOW_ACTIVE
     digitalWrite(LED_BUILTIN, 0);  // wenn kein DCC-Signal mehr kommt, die LED ausschalten
+#else
+    digitalWrite(LED_BUILTIN, 1);  // wenn kein DCC-Signal mehr kommt, die LED ausschalten
+#endif
     blinker_aus = 10000;
   }
 }
@@ -265,7 +290,11 @@ void notifyDccMsg(DCC_MSG *Msg)
   // LED einschalten
   blinker_an--;
   if (blinker_an == 0) {
+#ifndef BLINKER_LOW_ACTIVE
     digitalWrite(LED_BUILTIN, 1);
+#else
+    digitalWrite(LED_BUILTIN, 0);
+#endif
     blinker_an = 5;
   }
 
