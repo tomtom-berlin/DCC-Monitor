@@ -554,7 +554,7 @@ void notifyDccMsg(DCC_MSG *Msg)
           z_lok_F21++;
         } else if (Befehls_Byte == 0b11011000) {
           Befehl = Befehls_Byte;    // 1101-1000 = F29 - F36
-          Funktion = Msg->Data[2];  // xxxx-xxxx = F36 - F29
+          Funktion = Msg->Data[3];  // xxxx-xxxx = F36 - F29
           z_lok_F29++;
         } else if ((Befehls_Byte & 0b11000000) == 64 && pktByteCount == 4) {
           Befehl = 0;  // 01RSSSSS
