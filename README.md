@@ -12,7 +12,7 @@ Benutzung für private Zwecke frei, Änderungen bitte mit dem ursprünglichen Er
 ESP 32 Pin | Optokoppler-Modu-Pin
 -----------+---------------------
   27       |  SIG
-  25       |  LED
+  22       |  LED
   3.3V     |  VDD
   GND      |  GND
 ```
